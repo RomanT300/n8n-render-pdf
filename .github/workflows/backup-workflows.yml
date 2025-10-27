@@ -1,0 +1,170 @@
+name: Auto-Backup n8n Workflows
+
+on:
+  # Ejecutar cada semana (domingos a las 00:00 UTC)
+  schedule:
+    - cron: '0 0 * * 0'
+  
+  # Permitir ejecución manual
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup-workflows:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Wake up n8n service (Render sleep mode)
+        run: |
+          echo "Despertando servicio n8n..."
+          
+          # Hacer múltiples requests para despertar el servicio
+          for i in {1..10}; do
+            echo "Request $i/10..."
+            curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+              https://n8n-pdf.onrender.com/ || true
+            sleep 10
+          done
+          
+          echo "Servicio despertado. Esperando estabilización..."
+          sleep 30
+
+      - name: Export workflows via API
+        env:
+          N8N_URL: https://n8n-pdf.onrender.com
+          N8N_API_TOKEN: ${{ secrets.N8N_API_TOKEN }}
+        run: |
+          python << 'PYEOF'
+          import requests
+          import json
+          import os
+          from datetime import datetime
+          from pathlib import Path
+          
+          url = os.environ['N8N_URL']
+          token = os.environ['N8N_API_TOKEN']
+          
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/json'
+          }
+          
+          print('=' * 70)
+          print('EXPORTANDO WORKFLOWS DE N8N')
+          print('=' * 70)
+          print()
+          
+          # Obtener workflows
+          response = requests.get(f'{url}/api/v1/workflows', headers=headers, timeout=60)
+          
+          if response.status_code != 200:
+              print(f'Error: HTTP {response.status_code}')
+              print('Servicio aun no disponible. Ejecutar manualmente mas tarde.')
+              exit(1)
+          
+          data = response.json()
+          workflows = data.get('data', []) if isinstance(data, dict) else data
+          
+          print(f'Workflows encontrados: {len(workflows)}')
+          print()
+          
+          if len(workflows) == 0:
+              print('No hay workflows para exportar')
+              exit(0)
+          
+          # Crear directorio de backup
+          output_dir = Path('workflows-backup')
+          output_dir.mkdir(exist_ok=True)
+          
+          # Exportar cada workflow
+          exported = 0
+          for idx, wf in enumerate(workflows, 1):
+              wf_id = wf.get('id')
+              wf_name = wf.get('name', 'unnamed')
+              safe_name = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in wf_name)
+              
+              print(f'  [{idx}/{len(workflows)}] {wf_name}...', end=' ')
+              
+              wf_response = requests.get(
+                  f'{url}/api/v1/workflows/{wf_id}',
+                  headers=headers,
+                  timeout=30
+              )
+              
+              if wf_response.status_code == 200:
+                  wf_data = wf_response.json()
+                  
+                  # Extraer data si viene wrapped
+                  if isinstance(wf_data, dict) and 'data' in wf_data:
+                      wf_data = wf_data['data']
+                  
+                  filename = f'{wf_id}_{safe_name}.json'
+                  with open(str(output_dir / filename), 'w', encoding='utf-8') as f:
+                      json.dump(wf_data, f, indent=2, ensure_ascii=False)
+                  
+                  print('OK')
+                  exported += 1
+              else:
+                  print('ERROR')
+          
+          # Crear archivo de metadata
+          with open(output_dir / 'BACKUP_INFO.txt', 'w') as f:
+              f.write(f'Backup automatico n8n\n')
+              f.write(f'Fecha: {datetime.now().isoformat()}\n')
+              f.write(f'URL: {url}\n')
+              f.write(f'Workflows exportados: {exported}/{len(workflows)}\n')
+          
+          print()
+          print(f'EXPORTADOS: {exported}/{len(workflows)}')
+          PYEOF
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet workflows-backup/; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No hay cambios en workflows"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Workflows actualizados"
+          fi
+
+      - name: Commit and push backup
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add workflows-backup/
+          git commit -m "chore: auto-backup n8n workflows ($(date -I))
+
+          🤖 Backup automatico de workflows
+          - Fecha: $(date --rfc-3339=seconds)
+          - Total workflows exportados
+          
+          Generated by GitHub Actions"
+          
+          git push
+
+      - name: Summary
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          echo "✅ Workflows respaldados exitosamente"
+          echo "📁 Ubicacion: workflows-backup/"
+          echo "🔗 Ver: https://github.com/RomanT300/n8n-render-pdf/tree/main/workflows-backup"
