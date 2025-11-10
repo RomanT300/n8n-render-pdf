@@ -2,7 +2,7 @@
 FROM n8nio/n8n:latest
 
 # Forzar rebuild - Última actualización: 2025-10-26
-ARG CACHE_BUST=2025-11-03
+ARG CACHE_BUST=2025-11-10
 
 # Cambiar a root para instalar dependencias
 USER root
